@@ -4,7 +4,7 @@ use std::io::Read;
 mod customloader;
 use core::ffi::c_void;
 use customloader::functions::{
-    is_dotnet_pe, fix_base_relocations, get_dos_header, get_nt_header,
+    fix_base_relocations, get_dos_header, get_nt_header,
     write_import_table, write_sections,
 };
 use customloader::types::{VirtualAlloc, IMAGE_NT_HEADERS64};
@@ -40,6 +40,14 @@ pub fn get_headers_size(buffer: &[u8]) -> usize {
     // Check if buffer is large enough for MZ signature
     if buffer.len() < 2 || buffer[0] != b'M' || buffer[1] != b'Z' {
         panic!("Not a PE file (MZ signature not found)");
+    }
+    
+    const DOTNET_SIGNATURE: [u8; 13] = [
+        0x2E, 0x4E, 0x45, 0x54, 0x46, 0x72, 0x61, 0x6D, 0x65, 0x77, 0x6F, 0x72, 0x6B,
+    ];
+        
+    if buffer.windows(DOTNET_SIGNATURE.len()).any(|window| window == DOTNET_SIGNATURE) {
+        panic!("It's a DOT NET file.");
     }
 
     // Get the offset to the NT header
@@ -91,63 +99,57 @@ fn main() -> Result<(), String> {
                 }
                 println!("File Opened");
 
-                if !is_dotnet_pe(&data) {
-                    unsafe {
-                        println!("Not a Dot net file.");
-                        
-                        // TODO:: add a function to check the device architecture before proocessing further.
-                        
-                        // Working with Headers //
-                        let headerssize = get_headers_size(&data);
-                        let imagesize = get_image_size(&data);
-                        let dosheader = get_dos_header(data.as_ptr() as *const c_void);
-                        let ntheader = get_nt_header(data.as_ptr() as *const c_void, dosheader);
-                        
-                        println!("Headers Size: {}", headerssize);
-                        println!("Image Size: {}", imagesize);
-                        println!("Dos Header Address: {:?}", dosheader);
-                        println!("NT Header Address: {:?}", ntheader);
-                        
-                        // TODO:: Need to add section specific permissions instead of RWX.
-                        let baseptr = VirtualAlloc(
-                            core::ptr::null_mut(),
-                            imagesize,
-                            MEM_COMMIT,
-                            PAGE_EXECUTE_READWRITE,
-                        );
+                unsafe {
+                    // TODO:: add a function to check the device architecture before proocessing further.
+                    
+                    // Working with Headers //
+                    let headerssize = get_headers_size(&data);
+                    let imagesize = get_image_size(&data);
+                    let dosheader = get_dos_header(data.as_ptr() as *const c_void);
+                    let ntheader = get_nt_header(data.as_ptr() as *const c_void, dosheader);
+                    
+                    println!("Headers Size: {}", headerssize);
+                    println!("Image Size: {}", imagesize);
+                    println!("Dos Header Address: {:?}", dosheader);
+                    println!("NT Header Address: {:?}", ntheader);
+                    
+                    // TODO:: Need to add section specific permissions instead of RWX.
+                    let baseptr = VirtualAlloc(
+                        core::ptr::null_mut(),
+                        imagesize,
+                        MEM_COMMIT,
+                        PAGE_EXECUTE_READWRITE,
+                    );
 
-                        // Write the headers to the allocated memory
-                        core::ptr::copy_nonoverlapping(
-                            data.as_ptr() as *const c_void,
-                            baseptr,
-                            headerssize,
-                        );
+                    // Write the headers to the allocated memory
+                    core::ptr::copy_nonoverlapping(
+                        data.as_ptr() as *const c_void,
+                        baseptr,
+                        headerssize,
+                    );
 
-                        // Working with sections, here //
-                        println!("Writing Sections\n");
-                        write_sections(baseptr, data.clone(), ntheader, dosheader);
+                    // Working with sections, here //
+                    println!("Writing Sections\n");
+                    write_sections(baseptr, data.clone(), ntheader, dosheader);
 
-                        // Write the import table to the allocated memory
-                        println!("\n\nWriting Import Table\n");
-                        write_import_table(baseptr, ntheader);
+                    // Write the import table to the allocated memory
+                    println!("\n\nWriting Import Table\n");
+                    write_import_table(baseptr, ntheader);
 
-                        // Does what it says
-                        println!("\nFixing Base Relocations\n");
-                        fix_base_relocations(baseptr, ntheader);
+                    // Does what it says
+                    println!("\nFixing Base Relocations\n");
+                    fix_base_relocations(baseptr, ntheader);
 
-                        let entrypoint = (baseptr as usize + (*(ntheader as *const IMAGE_NT_HEADERS64)).OptionalHeader.AddressOfEntryPoint as usize) as *const c_void;
+                    let entrypoint = (baseptr as usize + (*(ntheader as *const IMAGE_NT_HEADERS64)).OptionalHeader.AddressOfEntryPoint as usize) as *const c_void;
 
-                        // Executing it //
-                        // Create a new thread to execute the image
-                        println!("Executing !!!");
-                        execute_image(entrypoint);
+                    // Executing it //
+                    // Create a new thread to execute the image
+                    println!("Executing !!!");
+                    execute_image(entrypoint);
 
-                        // Free the allocated memory of baseptr
-                        let _ = baseptr;
-                    };
-                } else {
-                    panic!(".net support not implemented yet 😅!")
-                }
+                    // Free the allocated memory of baseptr
+                    let _ = baseptr;
+                };
 
                 Ok(())
             }

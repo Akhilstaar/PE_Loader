@@ -16,9 +16,8 @@ use crate::customloader::types::{
 };
 
 pub fn readname_from_addr(baseaddress: *const u8) -> String {
-    let mut temp = Vec::with_capacity(143); // 143 should be enough ig
+    let mut temp = Vec::new();
 
-    // Iterate through the memory at the given address
     unsafe {
         let mut ptr = baseaddress;
         while *ptr != 0 {
@@ -30,25 +29,12 @@ pub fn readname_from_addr(baseaddress: *const u8) -> String {
     String::from_utf8_lossy(&temp).to_string() // Finally, convert the buffer to a string
 }
 
-pub fn is_dotnet_pe(pe_buffer: &[u8]) -> bool {
-    const DOTNET_SIGNATURE: [u8; 13] = [
-        0x2E, 0x4E, 0x45, 0x54, 0x46, 0x72, 0x61, 0x6D, 0x65, 0x77, 0x6F, 0x72, 0x6B,
-    ];
-    
-    pe_buffer.windows(DOTNET_SIGNATURE.len()).any(|window| window == DOTNET_SIGNATURE)
-}
-
 pub fn get_dos_header(image_ptr: *const c_void) -> *const IMAGE_DOS_HEADER {
     image_ptr as *const IMAGE_DOS_HEADER
 }
 
-pub fn get_nt_header(
-    image_base_address: *const c_void,
-    dos_header: *const IMAGE_DOS_HEADER,
-) -> *const c_void {
-    let nt_header_address = unsafe {
-        (image_base_address as usize + (*dos_header).e_lfanew as usize) as *const IMAGE_NT_HEADERS64
-    };   
+pub fn get_nt_header(image_base_address: *const c_void, dos_header: *const IMAGE_DOS_HEADER,) -> *const c_void {
+    let nt_header_address = unsafe {(image_base_address as usize + (*dos_header).e_lfanew as usize) as *const IMAGE_NT_HEADERS64};
     nt_header_address as *const c_void
 }
 
@@ -64,9 +50,9 @@ fn data_dir(ntheader: *const c_void) -> IMAGE_DATA_DIRECTORY {
     }
 }
 
-pub fn write_sections(baseptr: *const c_void,buffer: Vec<u8>,ntheader: *const c_void,dosheader: *const IMAGE_DOS_HEADER,) {
-    let nt_header_size = core::mem::size_of::<IMAGE_NT_HEADERS64>();
+pub fn write_sections(baseptr: *const c_void, buffer: Vec<u8>, ntheader: *const c_void, dosheader: *const IMAGE_DOS_HEADER,) {
     let e_lfanew = unsafe { (*dosheader).e_lfanew as usize };
+    let nt_header_size = core::mem::size_of::<IMAGE_NT_HEADERS64>();
     let mut st_section_header = (baseptr as usize + e_lfanew + nt_header_size) as *const IMAGE_SECTION_HEADER;
 
     for _i in 0..total_sections(ntheader) {
@@ -154,40 +140,41 @@ fn verifyntheader(ntheader: *const c_void) {
     println!("\nProbably loaded fine \n\\n\n")
 }
 
-pub fn validate_image_descriptor(ogfirstthunkptr: *mut c_void) -> bool {
+pub fn validate_image_descriptor(original_first_thunk_ptr: *mut c_void) -> bool {
     unsafe {
-        (*(ogfirstthunkptr as *const IMAGE_IMPORT_DESCRIPTOR)).Name != 0
-            && (*(ogfirstthunkptr as *const IMAGE_IMPORT_DESCRIPTOR)).FirstThunk != 0
+        (*(original_first_thunk_ptr as *const IMAGE_IMPORT_DESCRIPTOR)).Name != 0
+            && (*(original_first_thunk_ptr as *const IMAGE_IMPORT_DESCRIPTOR)).FirstThunk != 0
     }
 }
 
 pub fn write_import_table(baseptr: *const c_void, ntheader: *const c_void,) {
-    // Check
-    verifyntheader(ntheader);
+    verifyntheader(ntheader); // Check
+
     let import_dir = data_dir(ntheader);
-    println!("Import Directory: {:?}", import_dir);
     if import_dir.Size == 0 { return; } // No imports
-    let mut ogfirstthunkptr = baseptr as usize + import_dir.VirtualAddress as usize;
-    println!("First Thunk Ptr: {:?}", ogfirstthunkptr);
+    let mut original_first_thunk_ptr = baseptr as usize + import_dir.VirtualAddress as usize;
+    
+    println!("Import Directory: {:?}", import_dir);
+    println!("First Thunk Ptr: {:?}", original_first_thunk_ptr);
     println!("Virtual Address: {:?}", import_dir.VirtualAddress);
     println!("Import Descriptor: {:?}", unsafe {
-        (*(ogfirstthunkptr as *const IMAGE_IMPORT_DESCRIPTOR)).Name
+        (*(original_first_thunk_ptr as *const IMAGE_IMPORT_DESCRIPTOR)).Name
     });
     println!("First Thunk: {:?}", unsafe {
-        (*(ogfirstthunkptr as *const IMAGE_IMPORT_DESCRIPTOR)).FirstThunk
+        (*(original_first_thunk_ptr as *const IMAGE_IMPORT_DESCRIPTOR)).FirstThunk
     });
 
-    while validate_image_descriptor(ogfirstthunkptr as *mut c_void){
+    while validate_image_descriptor(original_first_thunk_ptr as *mut c_void){
         let mut import = unsafe { core::mem::zeroed::<IMAGE_IMPORT_DESCRIPTOR>() };
         unsafe {
             core::ptr::copy_nonoverlapping(
-                ogfirstthunkptr as *const u8,
+                original_first_thunk_ptr as *const u8,
                 &mut import as *mut IMAGE_IMPORT_DESCRIPTOR as *mut u8,
                 core::mem::size_of::<IMAGE_IMPORT_DESCRIPTOR>(),
             );
         }
         let dllname = readname_from_addr((baseptr as usize + import.Name as usize) as *const u8);
-        print!("Loading {} ... ", dllname);
+        print!("Loading dll : {}", dllname);
 
         // Load the DLL
         // TODO: Implement Loading of DLL natively
@@ -196,8 +183,7 @@ pub fn write_import_table(baseptr: *const c_void, ntheader: *const c_void,) {
         let mut thunkptr = unsafe {
             baseptr as usize + (import.Anonymous.OriginalFirstThunk as usize | import.Anonymous.Characteristics as usize)
         };
-
-        let mut i = 0;
+        let mut funcaddr_ptr = (baseptr as usize + import.FirstThunk as usize) as *mut usize;
 
         while unsafe { *(thunkptr as *const usize) } != 0 {
             let mut thunkdata: [u8; core::mem::size_of::<usize>()] = unsafe { core::mem::zeroed::<[u8; core::mem::size_of::<usize>()]>() };
@@ -205,19 +191,21 @@ pub fn write_import_table(baseptr: *const c_void, ntheader: *const c_void,) {
                 core::ptr::copy_nonoverlapping(thunkptr as *const u8, &mut thunkdata as *mut u8,core::mem::size_of::<usize>(),);
             }
             let offset = usize::from_ne_bytes(thunkdata);
+            // Read the function name
             let funcname = readname_from_addr((baseptr as usize + offset as usize + 2) as *const u8);
             
             if !funcname.is_empty() {
+                // Get it's address
                 let funcaddress = unsafe { GetProcAddress(dllhandle, funcname.as_bytes().as_ptr() as *const u8) };
-                let funcaddress_ptr = (baseptr as usize + import.FirstThunk as usize + i * core::mem::size_of::<usize>()) as *mut usize;
 
-                println!("Imported {}, from {}", funcname, funcaddress as usize);
-                unsafe { core::ptr::write(funcaddress_ptr, funcaddress as usize) };
+                println!("Imported {}", funcname);
+                // Write it's address
+                unsafe { core::ptr::write(funcaddr_ptr, funcaddress as usize) };
             }
-            i += 1;
+            funcaddr_ptr = ((funcaddr_ptr as usize) + core::mem::size_of::<usize>()) as *mut usize;
             thunkptr += core::mem::size_of::<usize>();
         }
-        ogfirstthunkptr += core::mem::size_of::<IMAGE_IMPORT_DESCRIPTOR>();
+        original_first_thunk_ptr += core::mem::size_of::<IMAGE_IMPORT_DESCRIPTOR>();
     }
 }
 

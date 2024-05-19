@@ -1,6 +1,6 @@
 // THE STANDARD DATA TYPE STRUCTS //
 
-#![allow(non_snake_case, non_camel_case_types)]
+#![allow(non_snake_case, non_camel_case_types)] // Just to get rid of rust warnings ..
 use core::ffi::c_void;
 
 #[link(name = "kernel32")]
